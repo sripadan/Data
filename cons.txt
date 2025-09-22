@@ -1,0 +1,866 @@
+🔹 1. Models
+Think of models as internal intent + design metadata.
+They describe what you (the producer/platform team) believe about your data.
+Purpose:
+•	Define structure, quality assumptions, and operational SLAs before any sharing.
+•	Allow early testing/validation even if no consumer exists yet.
+What they contain:
+•	Schema shape: field names, types, nullability, keys.
+•	Volume expectations: avg, stdev, tolerances (5M rows/day ±10%).
+•	Timeliness: expected arrival times, refresh frequencies.
+•	Lineage assumptions: “Dataset B depends on Dataset A daily.”
+•	Data quality rules: “amount > 0 for all rows.”
+Characteristics:
+•	Stored in catalogs, metadata repos, or modeling tools.
+•	Owned by producer/platform teams.
+•	May never leave your boundary — consumers might never see your internal design notes.
+________________________________________
+🔹 2. Contracts
+Contracts are shared, enforceable promises.
+They’re what the outside world (consumers, governance, downstream platforms) can rely on.
+Purpose:
+•	Expose expectations that matter at the exchange boundary.
+•	Allow consumers to build integrations, checks, and trust.
+What they contain:
+•	Subset of model expectations, but only those relevant across boundaries.
+•	Schema guarantees: names, types, versioning rules (backward/forward compatible).
+•	Operational SLAs: delivery by 9am UTC, completeness ≥ 99%.
+•	Contractual obligations: “Breaking schema without notice = violation.”
+Characteristics:
+•	Stored in contract registries, not just catalogs.
+•	Owned jointly (producer = responsible, consumer = dependent).
+•	Enforced at runtime by the execution engine.
+________________________________________
+🔹 3. Models → Contracts → Execution
+Here’s how they link:
+Layer	Who Authors It	Who Consumes It	Example
+Model	Producer team	Internal platform, QA	“Dataset X should have ~5M rows/day.”
+Contract	Producer + Consumer	Both sides	“Dataset X will publish ≥ 4.5M rows/day by 9am UTC.”
+Execution	Platform/Engine	Ops + Governance	Run checks → PASS/FAIL (volume check triggered alert today).
+________________________________________
+🔹 4. Why This Matters
+•	If you only have models:
+→ Great for design-time, but consumers can’t rely on them.
+•	If you only have contracts:
+→ Consumers get promises, but producers may not have internal metadata discipline to keep them accurate.
+•	If you unify:
+→ Author once in the model → publish subset as a contract → enforce via execution.
+________________________________________
+🔹 5. Analogy
+•	Model = Blueprint (your house plan: number of rooms, plumbing layout).
+•	Contract = Lease agreement (what you promise the tenant: 2 bedrooms, working plumbing, fixed rent).
+•	Execution = Inspections (is the plumbing working today? did both bedrooms get delivered?).
+________________________________________
+✅ So in your situation:
+•	Persist expectations in models first → they’re the “single source of truth.”
+•	Generate contracts from models → exposing only what’s relevant at boundaries.
+•	Enforce via execution layer → checks run automatically, results scored & surfaced.
+________________________________________
+Deep dive and put all the things together, no need to generate diagrams
+ 
+Great — below is a single, comprehensive deep-dive blueprint that pulls models, contracts, execution, telemetry, UI, governance, APIs, rules, and migration together into a practical implementation plan. I left out diagrams per your request and focused on clear, actionable detail you can hand to platform, product, and governance teams.
+ ________________________________________
+1) Core Concepts & Definitions (short)
+•	Model — internal design metadata: full schema, baselines, tolerances, lineage, rule library. Owned by producer/platform team.
+•	Contract — shareable, enforceable subset of model exposed at an exchange boundary (dataset, distribution, subscription). Jointly owned (producer + consumers). Versioned (SemVer) and lifecycle-managed.
+•	Execution Engine — runs checks (policy-as-code), emits pass/fail/omit events, writes detailed run logs for audit, and creates aggregated rollups for UI/search.
+•	SDK / Agent — policy runner used by producers/consumers to evaluate checks close to the source (push) or during ingestion (pull).
+•	Scorecard — persona-specific rollup of checks into a hygiene score (weights configurable by product/role).
+•	Exposure boundary — any point data leaves an application boundary (push/pull, share, grant access, API, dataset publish) → that triggers contract obligations.
+________________________________________
+2) Authoring: What lives in the Model vs Contract
+Model (full fidelity)
+•	Schema: fields, types, keys, nullability
+•	Business rules: e.g., amount > 0
+•	Baselines: rolling 28d avg, sd, percentiles
+•	Operational expectations: cadence, refresh frequency, readiness times
+•	Tolerances: ±% bands, absolute floors
+•	Lineage & dependencies
+•	Anomaly metadata: holiday calendars, deploy windows
+•	Example storage: metadata catalog (YAML/JSON), with linkage to repo/PR history.
+Contract (subset, enforceable)
+•	Dataset ID, owner, producers, consumers
+•	Contract version (SemVer) and compatibility policy
+•	Schema guarantees (required public fields, compatibility rules)
+•	SLAs: ready_by, completeness_min, volume_floor, deviation_pct
+•	Obligations: break policy, incident notify targets, retention
+•	Lifecycle state: Draft / Proposed / Approved / Active / Deprecated / Retired
+Principle: Contract fields must be well-scoped — publish only what the consumer needs to rely on.
+________________________________________
+3) Contract Lifecycle & Versioning (practical rules)
+•	Draft → Proposed (producer authors; automated tests against model)
+•	Proposed → Approved (governance + consumer sign-off)
+•	Approved → Active (publish and bind; platform enforces)
+•	Active → Deprecated (announce breaking change; begin sunset)
+•	Deprecated → Retired (sunset elapsed; contract removed)
+Versioning
+•	PATCH (x.y.z): docs, metadata-only changes — no consumer action
+•	MINOR (x.Y.z): additive, backward-compatible additions (optional fields)
+•	MAJOR (X.y.z): breaking changes — must deprecate old major, announce 30–90d, migration plan required
+________________________________________
+4) Execution Semantics — Checks & Categories
+Categories of checks
+•	Schema validation (type, nullability, required fields)
+•	Completeness (header vs payload count, PK presence)
+•	Volume (today vs baseline ± tolerance; absolute floors)
+•	Timeliness (arrival vs ready_by SLA; lag p50/p95)
+•	Business rules / Domain checks (predicates like amount > 0)
+•	Anomaly assist (seasonality, holidays, deploy cooloff)
+•	Contract conformance (contract version used, obligations honored)
+Execution outputs
+A run emits a structured results object with:
+•	execution_id, dataset, contract_version, producer, consumer
+•	checks array {name, status, observed, expected, details}
+•	score object {overall, components, weights}
+•	timestamps {started, completed}
+•	evidence_links (contract snapshot id, run logs, failed examples)
+Statuses include: PASS, FAIL, OMIT (rule not applicable), NOT_RECEIVED.
+________________________________________
+7) APIs (recommendations & examples)
+Contract Registry
+•	POST /contracts — create draft
+•	PUT /contracts/{id} — update draft
+o	POST /contracts/{id}/propose
+o	POST /contracts/{id}/approve
+o	POST /contracts/{id}/activate
+o	POST /contracts/{id}/deprecate {sunset_days}
+•	GET /contracts/{id} — returns contract & version history
+Subscription / Exposure
+•	POST /subscriptions — consumer subscribes to dataset + contract_version + purpose
+•	GET /subscriptions?consumer=...
+________________________________________
+8) Alerts, SLIs & SLOs
+•	SLIs: p95 ingestion lag, on-time delivery %, volume-deviation %
+•	SLOs: on-time ≥ 99% monthly; schema violations ≤ 3/day (7d rolling)
+•	Alert severities:
+o	P1: SLA miss + volume below floor (auto-pager)
+o	P2: Large deviation but arrived on time (email + ticket)
+o	P3: Minor schema additions (digest)
+•	Routing: configured per contract (contract.obligations.incident_notify)
+•	Suppressions: use holiday calendars & deploy cooloff windows to avoid noisy alerts
+10) Subscription & Transformations
+•	Subscription record: consumer_id, dataset_id, contract_version, purpose, retention, transformation_flag
+•	If a consumer materially transforms data into a new dataset (changes semantics), that becomes a new dataset with its own contract — the consumer becomes producer for that new dataset.
+•	For streaming transforms, enforce lineage metadata and attach original contract snapshot to derived dataset metadata.
+________________________________________
+11) Audit, Evidence & Compliance
+•	Immutable run logs stored with a run hash and contract snapshot id (which contract version applied).
+•	Chain-of-custody: store producer timestamp, ingestion timestamp, consumer pull timestamp.
+•	Contract snapshot: store exact contract content used during a run to prove which obligations were enforced.
+•	Retention: align with org policy (e.g., 1 year hot, 3–7 years cold).
+•	Access control: RBAC on who can create/approve/deprecate contracts; audit trails on contract changes.
+________________________________________
+16) Governance & RACI (who does what)
+•	Produces: owns model, proposes contracts, ensures producer checks, provides run evidence.
+•	Consumes: subscribes to contract, validates integration, raises concerns on breaking changes.
+•	Governance (CDO): approves contracts, sets sunset windows, enforces policy.
+________________________________________
+17) Quick checklist to get started (actionable)
+1.	Choose 3 exemplar datasets (high-impact) as pilots.
+2.	Create model metadata for each (schema, baseline, SLA).
+3.	Draft contracts (limited fields) and run them through governance for approval.
+4.	Stand up ingestion endpoint and basic SDK to emit schema + header checks.
+5.	Surface runs in a simple Ops UI and create first alert for P1 condition (SLA miss + floor).
+6.	Iterate contract fields & scoring based on pilot feedback and broaden rollout.
+________________________________________
+18) Next deliverables I can produce for you (pick any)
+•	Contract YAML template + validation schema (JSON Schema).
+•	SDK skeleton (Python) with sample rule DSL runner.
+•	Concrete API OpenAPI spec for Contract Registry & Ingest endpoints.
+•	Example product scorecard config + UI wireframe text spec.
+•	Migration plan to move current V1 scoring into versioned scoring (deltas, rescore).
+________________________________________
+1. Execution ↔ Contract Link
+Every execution run must reference the exact contract version it was validated against. That creates a foreign key–style relationship:
+•	Contract table/registry
+o	contract_id (e.g., payments.transactions)
+o	version (SemVer: 2.1.0)
+o	snapshot_hash (hash of the contract YAML at approval/activation)
+o	lifecycle state, metadata, etc.
+•	Execution table
+o	execution_id (UUID/timestamp-based)
+o	dataset_id (should match contract_id)
+o	contract_version (FK → Contract.version)
+o	contract_snapshot_hash (FK → Contract.snapshot_hash, immutable)
+o	producer_id
+o	consumer_id
+o	check results, score, timestamps, etc.
+So, in relational terms:
+ALTER TABLE executions
+  ADD CONSTRAINT fk_contract
+  FOREIGN KEY (dataset_id, contract_version, contract_snapshot_hash)
+  REFERENCES contracts (id, version, snapshot_hash);
+This guarantees that when you inspect any past execution, you know exactly which contract snapshot governed it — even if the contract was later updated.
+________________________________________
+2. Why include snapshot hash?
+•	A contract may be modified within the same version (e.g., fixing a description).
+•	By storing the hash of the actual YAML content, you guarantee immutability of the evidence.
+•	This is your chain of custody: no “moving target” contracts.
+________________________________________
+3. Practical workflow
+•	At execution start, the SDK/engine queries the contract registry for the active contract snapshot for dataset payments.transactions@2.1.0.
+•	It stamps that snapshot hash into the run metadata.
+•	When persisting execution results → it writes (contract_id, version, snapshot_hash) alongside.
+•	Later: when viewing results in Ops UI or scorecards, you can fetch the same snapshot for audit/compliance.
+________________________________________
+4. UI / Audit implications
+•	Ops UI → “This run failed under contract payments.transactions@2.1.0 (snapshot 9ac7f1…).”
+•	Audit evidence → “Execution 12345 validated against contract YAML hash 9ac7f1… (content attached).”
+•	Governance → If a consumer disputes a failure, you can reproduce the evaluation using the frozen snapshot.
+
+Would you like me to sketch a minimal relational schema (Postgres style) for both contracts and executions tables with these FKs?
+You said:
+What is contract registry here, is it a table
+
+Great question 👍 — the “contract registry” is the system of record for all contracts.
+At minimum it is a set of tables in a database. Depending on maturity, it could grow into a microservice with APIs on top, but the storage backbone is a relational model.
+________________________________________
+1. What the Contract Registry Does
+•	Stores all contracts and their snapshots (versions of the YAML).
+•	Enforces lifecycle state transitions (Draft → Active, etc.).
+•	Provides lookup so producers/consumers/SDKs can fetch the correct contract version.
+•	Ensures immutability — once a snapshot is activated, it’s frozen (only deprecate/retire allowed).
+•	Acts as the foreign key target for execution runs.
+________________________________________
+4. Contract Registry in Practice
+•	At MVP: ✅ It’s just tables in a metadata DB.
+•	With APIs: expose CRUD endpoints (POST /contracts, POST /contracts/{id}/propose, etc.).
+•	With governance: add workflow + approvals before moving state forward.
+•	With audit: attach evidence (who approved, when, commit hash of YAML in git).
+ ________________________________________
+1. What’s in the contract itself (conceptually)
+A contract describes:
+•	Who owns it (accountable team)
+•	Who the producers are (who can publish under it)
+•	Who the consumers are (who is subscribed / bound to it)
+So yes — conceptually, producer & consumer info is part of the contract definition.
+But in the registry schema, you usually want to normalize it.
+________________________________________
+1. Definition of a Contract
+•	Producer Contract = one per data asset (default).
+o	Defines schema, allowed values, SLAs, DQ rules (validations, thresholds).
+•	Consumer Sub-Contract (optional) = only when consumer needs materially different requirements.
+o	Think of it as a derived contract version referencing the producer contract.
+________________________________________
+2. Enforcement of Contracts
+•	Step 1: Write/Publish Contract
+Producer publishes contract (API/UI → stored in metamodel tables).
+•	Step 2: Enforce Contract
+Enforcement engine (TDQ SDK / BTQ SDK) validates data in motion / data at rest against the rules from the contract.
+•	Step 3: Monitor Compliance
+Store pass/fail results (violations).
+o	If violation → look up consumer contract thresholds → decide severity.
+o	Trigger alerts (email, Jira ticket, etc.) if configured.
+________________________________________
+3. Producer vs Consumer Contracts
+•	Producer Contract (preferred)
+o	One source of truth per data asset.
+o	Lower maintenance overhead.
+•	Consumer-Specific Needs
+o	Instead of full consumer-oriented contracts, define sub-contracts / overlays.
+o	Example: Producer defines dq_threshold = 95%.
+	Consumer A → override: ≥ 99%.
+	Consumer B → override: ≥ 90%.
+o	Violations = checked relative to the consumer’s sub-contract.
+
+Contract Schema
+ Dataset-Level
+1.	Producer publishes contract → contracts, contract_versions, contract_rules.
+2.	Consumer subscribes → contract_subscriptions.
+o	Optional stricter requirements → subscription_overrides.
+3.	Execution runs (batch/stream/API call) → executions.
+4.	Validation engine:
+o	Load base rules from contract_rules.
+o	Apply overrides from subscription_overrides.
+o	Check data delivery.
+5.	Violations logged → contract_violations, tied to both execution + subscription.
+________________________________________
+ Dataset-level contract model with richer governance info:
+•	Publisher (application/service) = who produces data.
+•	Consumer (application/service) = who uses data.
+•	Access & Use = how data may be accessed (e.g., API, batch, streaming) and allowed usage (analytics, ML, compliance).
+•	Recovery Objectives = RPO (Recovery Point Objective) and RTO (Recovery Time Objective) for resilience.
+Let’s redesign the schema with those included.
+________________________________________
+🔑 How This Model Captures Your Needs
+•	Publisher application
+o	In contract_versions.publishers (list of valid apps).
+o	In executions.publisher_app (actual app that published/validated).
+•	Consumer application
+o	In contract_subscriptions.consumer_app.
+o	Linked to violations via subscription_id.
+•	Access & Use
+o	In contract_versions.access_modes (API, Batch, Streaming).
+o	In contract_versions.allowed_uses (Analytics, ML, Compliance).
+•	Recovery Objectives
+o	In contract_versions.rpo_minutes and contract_versions.rto_minutes.
+ 
+Contract: payments.transactions@1.0
+•	Technical Rules
+o	txn_id must be non-null.
+o	event_time within 5 min of arrival.
+•	Business Rules
+o	amount >= 0.
+o	currency ∈ {USD, EUR, GBP}.
+•	RPO/RTO
+o	RPO = 15 min, RTO = 60 min.
+Execution Result
+•	TDQ pass rate = 98%
+•	BDQ pass rate = 92%
+•	Violations logged for negative amount values (BDQ).
+________________________________________
+Contract Schema
+________________________________________
+🔑 Key Benefits of Separation
+•	TDQ vs BDQ clearly scoped → no mixing system-level checks with semantic rules.
+•	Different override semantics → TDQ overrides = thresholds, BDQ overrides = business expressions.
+•	Violations stored separately → makes reporting easy: “system quality vs business quality.”
+•	Executions can summarize results from both in one place.
+
+________________________________________
+🔄 Lifecycle Walkthrough
+1.	Contract Version created (payments.transactions@1.0)
+o	RPO = 15 min, RTO = 60 min
+o	TDQ rules (null %, timeliness)
+o	BDQ rules (amount ≥ 0, currency in {USD, EUR})
+2.	Publisher app (payments-service) publishes data → validated at runtime.
+3.	Consumers (risk-engine, reporting) subscribe → overrides applied.
+4.	Execution run (batch or stream micro-batch) checks data against TDQ & BDQ.
+5.	Violations recorded (per rule, per consumer).
+6.	Alerts triggered:
+o	Rule = BDQ “amount ≥ 0” failed, Critical severity.
+o	Alert sent via Slack to payments team + PagerDuty for ops.
+o	Alert tracked until acknowledged.
+________________________________________
+✅ Benefits of This Model
+•	Clear separation of TDQ vs BDQ.
+•	Consumer-specific strictness via overrides.
+•	Full lineage: Contract → Rule → Execution → Violation → Alert.
+•	Ops integration: Alerts feed into enterprise monitoring (Slack, PagerDuty, SIEM).
+•	Recovery objectives (RPO/RTO) modeled for SLA compliance.
+ 
+ 
+________________________________________
+ 
+ Defines:
+•	Schema + rules (TDQ & BDQ)
+•	SLAs (RPO, RTO)
+•	Access methods (API, Batch, Streaming)
+•	Allowed usage (Analytics, ML, Compliance, etc.)
+  ________________________________________
+🔹 Meta-Model Summary (Tables / Entities)
+•	producer_applications
+•	producer_contracts (with versions, schema, access, usage, SLA)
+•	producer_tdq_rules
+•	producer_bdq_rules
+•	consumer_applications
+•	consumer_contracts (link to producer, declare access/use)
+•	consumer_tdq_overrides
+•	consumer_bdq_overrides
+•	executions (actual runs against data)
+•	violations (which rules failed, severity)
+•	alerts (notifications triggered from violations)
+________________________________________
+🔹 Example Flow
+1.	Producer payments-service publishes contract v1.0.
+o	Timeliness ≤ 5 min, Null ≤ 5%.
+o	Allowed use: {Analytics, ML}.
+o	Access: {Batch, Streaming}.
+2.	Consumer risk-engine subscribes.
+o	Access = Streaming.
+o	Intended use = Compliance.
+o	Overrides: timeliness ≤ 1 min, Null ≤ 1%.
+3.	Execution detects timeliness = 3 min.
+o	Passes producer SLA (≤5).
+o	Fails consumer override (≤1).
+4.	Violation recorded: consumer-specific.
+5.	Alert sent: only to risk-engine team.
+________________________________________
+✅ This meta-model gives you:
+•	Governance anchored at producer.
+•	Flexibility for consumers to declare stricter expectations.
+•	Clear separation of technical vs business quality.
+•	Traceability from contract → execution → violation → alert.
+________________________________________
+🏗️ Unified Contract Model
+________________________________________
+🔹 Core Idea
+•	One contracts table
+o	A producer contract = a root contract (no parent).
+o	A consumer contract = a child referencing a producer contract (or another consumer if chaining is allowed).
+•	Rules (TDQ/BDQ) always attach to a contract.
+•	Consumers may override producer rules by attaching stricter versions to their child contract.
+•	Access & usage policies are part of the contract definition.
+________________________________________
+🏗️ Meta-Model  
+🔹 Contracts (entity identity)
+This is the logical contract (producer or consumer).
+Each contract can have multiple versions.
+________________________________________
+🔹 Contract Versions
+Each version is immutable and contains the actual definition.
+This is where we store YAML, SLA, RPO/RTO, etc.
+  
+Only place where version_id exists.
+Everything else hangs off this table (directly or indirectly).
+ 
+________________________________________
+🔹 Data Access & Usage
+Point to the contract, not the version.
+When you want access/usage for a specific version → you join through contract_versions.
+  
+________________________________________
+🔹 Runtime: Executions, Violations, Alerts
+Executions reference a version_id, since they must run against an immutable definition.
+Violations and alerts flow from executions (so they don’t need version_id themselves).
+ 
+________________________________________
+🔄 How This Works
+•	Producer defines contract → row in contracts.
+•	Publishes version 1.0 → row in contract_versions.
+•	Attaches rules, access, usage → tied to contract_id.
+•	Consumer contract → contracts row with parent_contract_id=producer_contract_id.
+•	Consumer overrides → just new TDQ/BDQ rows tied to consumer’s contract_id.
+•	Execution → must point to a version_id.
+•	Violation → Alert → flow through execution to reach the right version context.
+
+Contract Tables
+contracts
+Holds main producer contracts and optional consumer override contracts.
+•	Consumer override contracts reference the parent producer contract.
+This is the logical contract (producer or consumer).
+Each contract can have multiple versions.
+________________________________________
+🔹 Contract Versions
+Each version is immutable and contains the actual definition.
+This is where we store YAML, SLA, RPO/RTO, etc.
+  
+Only place where version_id exists.
+Everything else hangs off this table (directly or indirectly).
+________________________________________
+contract_versions
+Stores versions of contracts. Only this table has the versioning info.
+________________________________________
+2️⃣ Subscription Table
+Each consumer subscribes to a contract version. Optional consumer contract is just a separate contract referenced here.
+________________________________________
+3️⃣ Technical & Business Data Quality Tables
+technical_data_quality_rules
+TDQ rules associated with a contract version.
+________________________________________
+4️⃣ Alerts Table
+TDQ/BDQ violations can trigger alerts.
+________________________________________
+5️⃣ Data Access & Usage Tables
+Tracks who accessed the data, purpose, and retention requirements.
+________________________________________
+6️⃣ Applications Table
+Simple table to store publisher and consumer applications.
+________________________________________
+🔹 Key Notes
+1.	Versioning: Only contract_versions has version info. All references from subscriptions, TDQ, BDQ, alerts, and access/usage are to a specific version.
+2.	Consumer overrides: Optional — they just create a new contract with parent_contract_id pointing to the producer contract.
+3.	Subscriptions: Only link consumer + contract version. No need to store producer info separately here.
+4.	Alerts & violations: Linked to contract_versions to maintain historical context.
+5.	Data access/usage: Flexible tables allow tracking both technical and business usage.
+
+
+
+1. Contracts
+-- =========================================
+-- 1. Applications Table
+-- =========================================
+CREATE TABLE applications (
+    application_id UUID PRIMARY KEY,
+    application_name TEXT NOT NULL,
+    owner TEXT,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+-- =========================================
+-- 2. Contracts Table
+-- =========================================
+CREATE TABLE contracts (
+    contract_id UUID PRIMARY KEY,
+    parent_contract_id UUID REFERENCES contracts(contract_id), -- NULL for producer contract
+    contract_name TEXT NOT NULL,
+    description TEXT,
+    publisher_id UUID NOT NULL REFERENCES applications(application_id), -- producer application
+    created_at TIMESTAMP DEFAULT now(),
+    updated_at TIMESTAMP DEFAULT now()
+);
+
+-- =========================================
+-- 3. Contract Versions Table
+-- =========================================
+CREATE TABLE contract_versions (
+    contract_version_id UUID PRIMARY KEY,
+    contract_id UUID NOT NULL REFERENCES contracts(contract_id),
+    version_number INT NOT NULL,
+    effective_date TIMESTAMP NOT NULL DEFAULT now(),
+    expiry_date TIMESTAMP,
+    sla_details JSONB,
+    recovery_objectives JSONB,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+-- =========================================
+-- 4. Subscriptions Table
+-- =========================================
+CREATE TABLE subscriptions (
+    subscription_id UUID PRIMARY KEY,
+    contract_version_id UUID NOT NULL REFERENCES contract_versions(contract_version_id),
+    consumer_id UUID NOT NULL REFERENCES applications(application_id),
+    status TEXT NOT NULL CHECK (status IN ('Active','Suspended','Revoked')),
+    start_date TIMESTAMP NOT NULL DEFAULT now(),
+    end_date TIMESTAMP,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+-- =========================================
+-- 5. Technical Data Quality Rules Table
+-- =========================================
+CREATE TABLE technical_data_quality_rules (
+    tdq_rule_id UUID PRIMARY KEY,
+    contract_version_id UUID NOT NULL REFERENCES contract_versions(contract_version_id),
+    data_element TEXT NOT NULL,
+    rule_expression TEXT NOT NULL,
+    threshold NUMERIC,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+-- =========================================
+-- 6. Business Data Quality Rules Table
+-- =========================================
+CREATE TABLE business_data_quality_rules (
+    bdq_rule_id UUID PRIMARY KEY,
+    contract_version_id UUID NOT NULL REFERENCES contract_versions(contract_version_id),
+    data_element TEXT NOT NULL,
+    rule_description TEXT NOT NULL,
+    acceptable_values JSONB,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+-- =========================================
+-- 7. Contract Alerts Table
+-- =========================================
+CREATE TABLE contract_alerts (
+    alert_id UUID PRIMARY KEY,
+    contract_version_id UUID NOT NULL REFERENCES contract_versions(contract_version_id),
+    alert_type TEXT NOT NULL CHECK (alert_type IN ('Email','Ticket','Webhook')),
+    severity TEXT NOT NULL CHECK (severity IN ('Low','Medium','High','Critical')),
+    recipients JSONB,
+    created_at TIMESTAMP DEFAULT now()
+);
+
+-- =========================================
+-- 8. Data Access Table
+-- =========================================
+CREATE TABLE data_access (
+    access_id UUID PRIMARY KEY,
+    contract_version_id UUID NOT NULL REFERENCES contract_versions(contract_version_id),
+    accessor_id UUID NOT NULL REFERENCES applications(application_id),
+    access_type TEXT NOT NULL CHECK (access_type IN ('Read','Write','Export','ETL')),
+    purpose TEXT,
+    timestamp TIMESTAMP DEFAULT now()
+);
+
+-- =========================================
+-- 9. Data Usage Table
+-- =========================================
+CREATE TABLE data_usage (
+    usage_id UUID PRIMARY KEY,
+    contract_version_id UUID NOT NULL REFERENCES contract_versions(contract_version_id),
+    accessor_id UUID NOT NULL REFERENCES applications(application_id),
+    usage_description TEXT,
+    usage_start TIMESTAMP,
+    usage_end TIMESTAMP
+);
+
+-- =========================================
+-- Indexes for Performance
+-- =========================================
+CREATE INDEX idx_contract_versions_contract ON contract_versions(contract_id);
+CREATE INDEX idx_subscriptions_contract_version ON subscriptions(contract_version_id);
+CREATE INDEX idx_tdq_contract_version ON technical_data_quality_rules(contract_version_id);
+CREATE INDEX idx_bdq_contract_version ON business_data_quality_rules(contract_version_id);
+CREATE INDEX idx_alerts_contract_version ON contract_alerts(contract_version_id);
+CREATE INDEX idx_data_access_contract_version ON data_access(contract_version_id);
+CREATE INDEX idx_data_usage_contract_version ON data_usage(contract_version_id);
+________________________________________
+🔄 Flow Recap
+1.	Producer defines contract → contracts row (role='Producer').
+2.	Publishes version → contract_versions.
+3.	Consumers subscribe → subscriptions link producer ↔ consumer.
+o	Can pin to version or always follow latest.
+4.	Rules, access, usage → tied to contract_id.
+5.	Execution runs → logs into executions with version_id.
+6.	Violations + alerts → flow from executions to downstream notification.
+________________________________________
+-- =========================================
+-- 1. Applications (Producer and Consumers)
+-- =========================================
+INSERT INTO applications (application_id, application_name, owner) VALUES
+('11111111-1111-1111-1111-111111111111', 'Sales_Data_Producer', 'Alice'),
+('22222222-2222-2222-2222-222222222222', 'Marketing_Consumer', 'Bob'),
+('33333333-3333-3333-3333-333333333333', 'Finance_Consumer', 'Charlie');
+
+-- =========================================
+-- 2. Producer Contract
+-- =========================================
+INSERT INTO contracts (contract_id, parent_contract_id, contract_name, description, publisher_id)
+VALUES 
+('aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', NULL, 'Sales Data Contract', 'Contract for Sales Data', '11111111-1111-1111-1111-111111111111');
+
+-- =========================================
+-- 3. Contract Versions
+-- =========================================
+INSERT INTO contract_versions (contract_version_id, contract_id, version_number, effective_date, sla_details, recovery_objectives)
+VALUES
+('bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 1, NOW(), 
+ '{"availability":"99.9%","latency":"5s"}', '{"RTO":"2h","RPO":"15m"}'),
+('cccccccc-cccc-cccc-cccc-cccccccccccc', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 2, NOW(), 
+ '{"availability":"99.95%","latency":"2s"}', '{"RTO":"1h","RPO":"5m"}');
+
+-- =========================================
+-- 4. Consumer Override Contract (Optional)
+-- =========================================
+INSERT INTO contracts (contract_id, parent_contract_id, contract_name, description, publisher_id)
+VALUES
+('dddddddd-dddd-dddd-dddd-dddddddddddd', 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa', 'Sales Data Consumer Override', 'Override for Finance Consumer', '11111111-1111-1111-1111-111111111111');
+
+-- =========================================
+-- 5. Consumer Subscription
+-- =========================================
+INSERT INTO subscriptions (subscription_id, contract_version_id, consumer_id, status)
+VALUES
+('eeeeeeee-eeee-eeee-eeee-eeeeeeeeeeee', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '22222222-2222-2222-2222-222222222222', 'Active'),
+('ffffffff-ffff-ffff-ffff-ffffffffffff', 'cccccccc-cccc-cccc-cccc-cccccccccccc', '33333333-3333-3333-3333-333333333333', 'Active');
+
+-- =========================================
+-- 6. Technical Data Quality Rules
+-- =========================================
+INSERT INTO technical_data_quality_rules (tdq_rule_id, contract_version_id, data_element, rule_expression, threshold)
+VALUES
+('1111aaaa-1111-aaaa-1111-aaaaaaaa1111', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'sales_amount', 'sales_amount >= 0', 0),
+('2222bbbb-2222-bbbb-2222-bbbbbbbb2222', 'cccccccc-cccc-cccc-cccc-cccccccccccc', 'sales_date', 'sales_date IS NOT NULL', NULL);
+
+-- =========================================
+-- 7. Business Data Quality Rules
+-- =========================================
+INSERT INTO business_data_quality_rules (bdq_rule_id, contract_version_id, data_element, rule_description, acceptable_values)
+VALUES
+('aaaa1111-aaaa-1111-aaaa-111111aaaa11', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'region', 'Region must be in allowed set', '["US","EU","APAC"]'),
+('bbbb2222-bbbb-2222-bbbb-222222bbbb22', 'cccccccc-cccc-cccc-cccc-cccccccccccc', 'product_category', 'Must be valid category', '["Electronics","Furniture","Clothing"]');
+
+-- =========================================
+-- 8. Contract Alerts
+-- =========================================
+INSERT INTO contract_alerts (alert_id, contract_version_id, alert_type, severity, recipients)
+VALUES
+('aaaabbbb-aaaa-bbbb-aaaa-aaaabbbb1111', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', 'Email', 'High', '["admin@sales.com"]'),
+('ccccdddd-cccc-dddd-cccc-ccccdddd2222', 'cccccccc-cccc-cccc-cccc-cccccccccccc', 'Ticket', 'Medium', '["ops@sales.com"]');
+
+-- =========================================
+-- 9. Data Access
+-- =========================================
+INSERT INTO data_access (access_id, contract_version_id, accessor_id, access_type, purpose)
+VALUES
+('1111cccc-1111-cccc-1111-cccc1111cccc', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '22222222-2222-2222-2222-222222222222', 'Read', 'Marketing analysis'),
+('2222dddd-2222-dddd-2222-dddd2222dddd', 'cccccccc-cccc-cccc-cccc-cccccccccccc', '33333333-3333-3333-3333-333333333333', 'Export', 'Finance reporting');
+
+-- =========================================
+-- 10. Data Usage
+-- =========================================
+INSERT INTO data_usage (usage_id, contract_version_id, accessor_id, usage_description, usage_start, usage_end)
+VALUES
+('aaaacccc-aaaa-cccc-aaaa-aaaacccc1111', 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb', '22222222-2222-2222-2222-222222222222', 'Monthly marketing campaign', NOW() - INTERVAL '1 month', NOW()),
+('bbbbdddd-bbbb-dddd-bbbb-bbbbdddd2222', 'cccccccc-cccc-cccc-cccc-cccccccccccc', '33333333-3333-3333-3333-333333333333', 'Quarterly financial report', NOW() - INTERVAL '3 months', NOW());
+________________________________________
+1️⃣ Contract & Version Management
+1.1 Get the latest version of all contracts
+SELECT c.contract_id, c.contract_name, cv.contract_version_id, cv.version_number, cv.effective_date
+FROM contracts c
+JOIN contract_versions cv 
+  ON c.contract_id = cv.contract_id
+WHERE cv.version_number = (
+    SELECT MAX(version_number)
+    FROM contract_versions
+    WHERE contract_id = c.contract_id
+);
+1.2 Get all versions of a contract
+SELECT cv.contract_version_id, cv.version_number, cv.effective_date, cv.status
+FROM contract_versions cv
+WHERE cv.contract_id = 'CONTRACT_ID_HERE'
+ORDER BY cv.version_number DESC;
+1.3 Get parent contract info (for consumer-specific overrides)
+SELECT c.contract_id, c.contract_name, c.parent_contract_id
+FROM contracts c
+WHERE c.parent_contract_id IS NOT NULL;
+________________________________________
+2️⃣ Subscriptions
+2.1 List all consumers subscribed to a contract
+SELECT s.subscription_id, a.application_name AS consumer_name, cv.version_number
+FROM subscriptions s
+JOIN applications a ON s.consumer_id = a.application_id
+JOIN contract_versions cv ON s.contract_version_id = cv.contract_version_id
+WHERE cv.contract_id = 'CONTRACT_ID_HERE';
+2.2 List all subscriptions with contract details
+SELECT s.subscription_id, c.contract_name, cv.version_number, a.application_name AS consumer_name, s.status
+FROM subscriptions s
+JOIN contract_versions cv ON s.contract_version_id = cv.contract_version_id
+JOIN contracts c ON cv.contract_id = c.contract_id
+JOIN applications a ON s.consumer_id = a.application_id;
+2.3 Find contracts with no active subscriptions
+SELECT c.contract_id, c.contract_name
+FROM contracts c
+LEFT JOIN contract_versions cv ON c.contract_id = cv.contract_id
+LEFT JOIN subscriptions s ON cv.contract_version_id = s.contract_version_id
+WHERE s.subscription_id IS NULL;
+________________________________________
+3️⃣ Technical Data Quality (TDQ)
+3.1 List TDQ rules for a contract version
+SELECT tdq.data_element, tdq.rule_expression, tdq.threshold
+FROM technical_data_quality_rules tdq
+WHERE tdq.contract_version_id = 'CONTRACT_VERSION_ID_HERE';
+3.2 Find contracts missing TDQ rules
+SELECT c.contract_id, c.contract_name
+FROM contracts c
+JOIN contract_versions cv ON c.contract_id = cv.contract_id
+LEFT JOIN technical_data_quality_rules tdq ON cv.contract_version_id = tdq.contract_version_id
+WHERE tdq.rule_id IS NULL;
+________________________________________
+4️⃣ Business Data Quality (BDQ)
+4.1 List BDQ rules for a contract version
+SELECT bdq.data_element, bdq.rule_description, bdq.acceptable_values
+FROM business_data_quality_rules bdq
+WHERE bdq.contract_version_id = 'CONTRACT_VERSION_ID_HERE';
+4.2 Find contracts missing BDQ rules
+SELECT c.contract_id, c.contract_name
+FROM contracts c
+JOIN contract_versions cv ON c.contract_id = cv.contract_id
+LEFT JOIN business_data_quality_rules bdq ON cv.contract_version_id = bdq.contract_version_id
+WHERE bdq.rule_id IS NULL;
+________________________________________
+5️⃣ Alerts
+5.1 Get alerts for a contract version
+SELECT alert_type, severity, recipients
+FROM contract_alerts
+WHERE contract_version_id = 'CONTRACT_VERSION_ID_HERE';
+5.2 List contracts with high severity alerts
+SELECT c.contract_name, cv.version_number, ca.alert_type, ca.severity
+FROM contracts c
+JOIN contract_versions cv ON c.contract_id = cv.contract_id
+JOIN contract_alerts ca ON cv.contract_version_id = ca.contract_version_id
+WHERE ca.severity = 'HIGH';
+________________________________________
+6️⃣ Data Access & Usage
+6.1 List all data access for a contract version
+SELECT da.access_type, da.purpose, a.application_name AS accessor_name
+FROM data_access da
+JOIN applications a ON da.accessor_id = a.application_id
+WHERE da.contract_version_id = 'CONTRACT_VERSION_ID_HERE';
+6.2 List all data usage for a contract version
+SELECT du.usage_description, a.application_name AS accessor_name, du.usage_start, du.usage_end
+FROM data_usage du
+JOIN applications a ON du.accessor_id = a.application_id
+WHERE du.contract_version_id = 'CONTRACT_VERSION_ID_HERE';
+6.3 Find usage by a specific consumer
+SELECT du.usage_description, c.contract_name, cv.version_number, du.usage_start, du.usage_end
+FROM data_usage du
+JOIN contract_versions cv ON du.contract_version_id = cv.contract_version_id
+JOIN contracts c ON cv.contract_id = c.contract_id
+WHERE du.accessor_id = 'CONSUMER_APPLICATION_ID_HERE';
+________________________________________
+7️⃣ Analytics / Summary Queries
+7.1 Count of consumers per contract version
+SELECT cv.contract_id, cv.contract_version_id, COUNT(s.subscription_id) AS consumer_count
+FROM contract_versions cv
+LEFT JOIN subscriptions s ON cv.contract_version_id = s.contract_version_id
+GROUP BY cv.contract_id, cv.contract_version_id;
+7.2 Contracts with no TDQ or BDQ rules
+SELECT c.contract_id, c.contract_name
+FROM contracts c
+JOIN contract_versions cv ON c.contract_id = cv.contract_id
+LEFT JOIN technical_data_quality_rules tdq ON cv.contract_version_id = tdq.contract_version_id
+LEFT JOIN business_data_quality_rules bdq ON cv.contract_version_id = bdq.contract_version_id
+WHERE tdq.rule_id IS NULL OR bdq.rule_id IS NULL;
+7.3 Subscriptions per consumer
+SELECT a.application_name AS consumer_name, COUNT(s.subscription_id) AS active_subscriptions
+FROM subscriptions s
+JOIN applications a ON s.consumer_id = a.application_id
+GROUP BY a.application_name;
+________________________________________
+✅ These SQL statements cover:
+•	Contract management (versions, parent/child relationships)
+•	Subscriptions (consumer lists, missing subscriptions)
+•	Technical & Business Data Quality rules
+•	Alerts
+•	Data Access & Usage
+•	Analytics / summary metrics
+
+
+Contracts:
+  type: object
+  properties:
+    contract_id:
+      type: string
+      description: Unique identifier for the contract
+    contract_name:
+      type: string
+      description: Name of the contract
+    parent_contract_id:
+      type: string
+      nullable: true
+      description: Optional reference to a parent contract (for consumer overrides)
+  required:
+    - contract_id
+    - contract_name
+
+Contract_Versions:
+  type: object
+  properties:
+    contract_version_id:
+      type: string
+      description: Unique identifier for this contract version
+    contract_id:
+      type: string
+      description: Reference to parent contract
+    version_number:
+      type: string
+      description: Version number (e.g., 1.0, 1.1)
+    effective_date:
+      type: string
+      format: date
+      description: Start date for this version
+    status:
+      type: string
+      enum: [DRAFT, ACTIVE, RETIRED]
+  required:
+    - contract_version_id
+    - contract_id
+    - version_number
+    - effective_date
+    - status
+
+Subscriptions:
+  type: object
+  properties:
+    subscription_id:
+      type: string
+      description: Unique identifier for subscription
+    contract_version_id:
+      type: string
+      description: Reference to contract version
+    consumer_id:
+      type: string
+      description: Identifier of the consumer application
+    subscription_date:
+      type: string
+      format: date
+      description: Date the subscription was created
+  required:
+    - subscription_id
+    - contract_version_id
+    - consumer_id
+    - subscription_date
