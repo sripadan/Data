@@ -1,0 +1,124 @@
+Data Contracts & Governance Design Document
+
+1. Introduction
+
+Modern data platforms need governance, auditability, and accountability between producers (who publish datasets) and consumers (who use them).
+Contracts provide a formalized agreement that governs dataset ownership, quality, access, and obligations.
+
+This document introduces the data contract model, explains its concepts, and provides a database design that supports auditability, consumer overrides, and runtime evidence.
+
+⸻
+
+2. Core Concepts
+
+Contracts (logical agreements)
+	•	A contract is a human/business-level agreement tied to one or more datasets.
+	•	It describes ownership, governance obligations, and recertification policies.
+	•	Contracts are lightweight metadata; detailed policies live in contract versions.
+
+👉 Why: Establishes accountability and provides a unit of negotiation between producer(s) and consumer(s).
+
+⸻
+
+Contract Versions (immutable snapshots)
+	•	Each contract version captures a full snapshot of policies (schema, rules, SLAs, access policies).
+	•	Versions are immutable for audit purposes.
+	•	Each version has a hash for tamper detection and deduplication.
+
+👉 Why: Provides audit trail, ensures reproducibility, and prevents silent drift.
+
+⸻
+
+Consumer Overrides
+	•	Consumers may create child contracts that override producer policies:
+	•	Add stricter quality rules
+	•	Change alerting
+	•	Restrict access
+	•	Consumer contracts are linked to producers using:
+	•	parent_contract_id (at contract level)
+	•	parent_contract_version_id (at version level, optional for auditability)
+
+👉 Why: Allows consumers to customize agreements without breaking producer guarantees.
+
+⸻
+
+TDQ vs BDQ Rules
+	•	TDQ (Technical Data Quality): machine-checkable, technical checks (nulls, schema, ranges).
+	•	BDQ (Business Data Quality): business semantics (domain lists, referential integrity).
+	•	Stored separately, owned by different roles, executed with different engines.
+
+👉 Why: Separation of responsibilities between data engineers (TDQ) and business stewards (BDQ).
+
+⸻
+
+Rules Executions (Results)
+	•	Store runtime evaluation of rules.
+	•	Captures status (PASS/FAIL/WARN), metrics, and sample errors.
+	•	Append-only; partitions/TTL recommended for scale.
+
+👉 Why: Provides telemetry and evidence of compliance/non-compliance.
+
+⸻
+
+Subscriptions
+	•	A subscription links a consumer contract to a contract version (or latest active).
+	•	Supports explicit version pinning for auditability.
+	•	Ensures consumers are tied to contracts (not just IDs), which enables overrides.
+
+👉 Why: Makes consumer obligations explicit and prevents silent policy drift.
+
+⸻
+
+Access vs Usage
+	•	Access (policy): versioned, describes allowed rights (read/export/write).
+	•	Usage (telemetry): high-volume operational logs, reconciled against access policies.
+
+👉 Why: Clear distinction between what should happen and what actually happened.
+
+⸻
+
+Recovery Objectives (RTO/RPO)
+	•	Captured per contract version.
+	•	Define recovery time and recovery point objectives.
+	•	Drive alerts when violated.
+
+👉 Why: Operational SLAs for resilience.
+
+⸻
+
+Alerts & Notifications
+	•	Policies for who gets notified when rules or SLAs fail.
+	•	Flexible recipient model (emails, Slack, PagerDuty, webhooks).
+
+👉 Why: Ensures violations trigger actionable responses.
+
+⸻
+
+Recertification
+	•	Scheduled review of contracts to prevent stale policies.
+	•	Captured as governance workflow with timestamps.
+
+👉 Why: Ensures contracts evolve with regulations and business changes.
+
+
+4. Effective Policy Resolution (Consumer Overrides)
+	•	Step 1: Find the subscribed consumer_contract_id in subscriptions.
+	•	Step 2: If contract_version_id is pinned → use it. Otherwise → resolve to latest active version.
+	•	Step 3: If consumer version has parent_contract_version_id → load producer version rules.
+	•	Step 4: Merge producer + consumer rules:
+	•	Conflict → consumer wins
+	•	Additions → union
+	•	Access rights → union/intersection (policy-driven)
+	•	Step 5: Apply merged policy at runtime.
+
+⸻
+
+5. Governance Best Practices
+	•	Ownership:
+	•	TDQ → Data Engineering
+	•	BDQ → Business Stewards
+	•	RTO/RPO → SRE/Operations
+	•	Auditability:
+	•	Keep all contract_versions immutable
+	•	Retain execution logs (summarize, archive raw)
+
